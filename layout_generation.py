@@ -13,7 +13,7 @@ from matplotlib import pyplot as plt
 num_epochs = 5
 lr = 0.0002
 beta1 = 0.5
-b_size = 64
+b_size = 16
 ###########################
 
 dataset = COCODataset('coco/annotations/instances_train2017.json')
@@ -43,6 +43,17 @@ for epoch in range(num_epochs):
         # Forward pass real batch through D
         segms = dataset.segm_by_ids(data)
         x_gen, y_gen, coefs = dataset.rand_obj_by_id(data)
+        # print(x_gen)
+        # print(y_gen)
+        # print(coefs)
+        # print(sum(x_gen) / len(x_gen))
+        # print(sum(y_gen) / len(y_gen))
+        # print(sum(coefs) / len(coefs))
+        # for i in range(len(x_gen)):
+        #     segms[i][segms[i] > 91] = 0
+        #     plt.imshow(segms[i])
+        #     plt.scatter(y_gen[i], x_gen[i])
+        #     plt.show()
         output = netD(torch.as_tensor(segms).type(torch.FloatTensor),
                       torch.as_tensor(x_gen),
                       torch.as_tensor(y_gen),
@@ -67,40 +78,49 @@ for epoch in range(num_epochs):
         ############# MERGE MASKS ################
         prev_segm = copy.deepcopy(segms)
         abc = fake.detach().numpy()
-        print("merge")
+        #print("merge")
         x = abc[:, 0] * 255
         y = abc[:, 1] * 255
         coef = abc[:, 2] * 256
+        # print(x)
+        # print(y)
+        # print(coef)
+        # print(sum(x) / len(x))
+        # print(sum(y) / len(y))
+        # print(sum(coef) / len(coef))
         sizes = coef * ratios
         for i in range(b_size):
-            resized = F.interpolate(torch.as_tensor(objects[i]).unsqueeze(0).unsqueeze(0),
-                                    size=(round(sizes[i]), round(coef[i]))).squeeze().numpy()
+            if round(sizes[i]) > 0 and round(coef[i]) > 0:
+                resized = F.interpolate(torch.as_tensor(objects[i]).unsqueeze(0).unsqueeze(0),
+                                        size=(round(sizes[i]), round(coef[i]))).squeeze().numpy()
+                if resized.ndim != 2:
+                    print("too small")
+                    continue
+                ###  crop object if needed
+                h_i, w_i = resized.shape
+                x_i_1 = round(x[i]) - h_i // 2
+                if x_i_1 < 0:
+                    resized = resized[-x_i_1:]
+                    x_i_1 = 0
+                x_i_2 = round(x[i]) + (h_i + 1) // 2
+                if x_i_2 > segms[i].shape[0]:
+                    resized = resized[:segms[i].shape[0]-x_i_2]
+                    x_i_2 = segms[i].shape[0]
+                y_i_1 = round(y[i]) - w_i // 2
+                if y_i_1 < 0:
+                    resized = resized[:, -y_i_1:]
+                    y_i_1 = 0
+                y_i_2 = round(y[i]) + (w_i + 1) // 2
+                if y_i_2 > segms[i].shape[1]:
+                    resized = resized[:, :segms[i].shape[1]-y_i_2]
+                    y_i_2 = segms[i].shape[1]
+                ###
 
-            ###  crop object if needed
-            h_i, w_i = resized.shape
-            x_i_1 = round(x[i]) - h_i // 2
-            if x_i_1 < 0:
-                resized = resized[-x_i_1:]
-                x_i_1 = 0
-            x_i_2 = round(x[i]) + (h_i + 1) // 2
-            if x_i_2 > segms[i].shape[0]:
-                resized = resized[:segms[i].shape[0]-x_i_2]
-                x_i_2 = segms[i].shape[0]
-            y_i_1 = round(y[i]) - w_i // 2
-            if y_i_1 < 0:
-                resized = resized[:, -y_i_1:]
-                y_i_1 = 0
-            y_i_2 = round(y[i]) + (w_i + 1) // 2
-            if y_i_2 > segms[i].shape[1]:
-                resized = resized[:, :segms[i].shape[1]-y_i_2]
-                y_i_2 = segms[i].shape[1]
-            ###
-
-            if resized.size == 0:
-                print("bad size")
-            if not np.any(resized > 0):
-                print("all false")
-            (segms[i][x_i_1:x_i_2, y_i_1:y_i_2])[resized > 0] = resized[resized > 0]
+                if resized.size == 0:
+                    print("bad size")
+                if not np.any(resized > 0):
+                    print("all false")
+                (segms[i][x_i_1:x_i_2, y_i_1:y_i_2])[resized > 0] = resized[resized > 0]
         ##########################################
 
         # Classify all fake batch with D
@@ -132,12 +152,16 @@ for epoch in range(num_epochs):
         optimizerG.step()
 
         # Output training stats
-        if i_batch % 5 == 0:
+        if (i_batch + 1) % 5 == 0:
             print('[%d/%d][%d/%d]\tLoss_D: %.4f\tLoss_G: %.4f\tD(x): %.4f\tD(G(z)): %.4f / %.4f'
-                  % (epoch, num_epochs, i_batch, len(dataloader),
+                  % (epoch, num_epochs, i_batch + 1, len(dataloader),
                      errD.item(), errG.item(), D_x, D_G_z1, D_G_z2))
-            for i in range(5):
-                plt.imshow(prev_segm[i])
-                plt.show()
-                plt.imshow(segms[i])
-                plt.show()
+            if (i_batch + 1) % 50 == 0:
+                for i in range(10):
+                    plt.imshow(prev_segm[i])
+                    plt.show()
+                    plt.imshow(segms[i])
+                    plt.show()
+
+    torch.save(netG.state_dict(), "models/" + str(epoch) + "netG.pt")
+    print("saved")
