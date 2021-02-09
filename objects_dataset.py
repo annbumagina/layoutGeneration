@@ -117,8 +117,7 @@ class COCODataset():
             for i in range(1, len(annotations)):
                 cat_id = annotations[i]["category_id"]
                 mask = self.thing_coco_api.annToMask(annotations[i])
-                mask[mask == 1] = cat_id
-                segm += mask
+                segm[np.logical_and(mask == 1, segm == 0)] = cat_id
 
             segm = self.crop(segm, 256, 256)
             images.append(segm)
@@ -172,12 +171,15 @@ class COCODataset():
         return ratios
 
 
-dataset = COCODataset('coco/annotations/instances_train2017.json', 'coco/annotations/stuff_train2017.json')
-ids = dataset.__getitem__([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-segms = dataset.segm_by_ids(ids)
-for i in range(10):
-    plt.imshow(segms[i])
-    plt.show()
+# dataset = COCODataset('coco/annotations/instances_train2017.json', 'coco/annotations/stuff_train2017.json')
+# print("Starting")
+# ids = dataset.__getitem__([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+# segms = dataset.segm_by_ids(ids)
+# obj = dataset.rand_obj_by_id(ids)
+# for i in range(10):
+    # plt.imshow(segms[i])
+    # plt.imsave('images/' + str(i) + 'segm.png', segms[i])
+# print("End")
 
 # classes = torch.randint(1, dataset.get_cat_num(), (100,))
 # objects = dataset.get_rand_by_cats(classes.numpy())
