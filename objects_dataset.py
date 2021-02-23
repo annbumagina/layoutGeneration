@@ -6,8 +6,6 @@ from matplotlib import pyplot as plt
 from functools import partial
 from PIL import Image
 
-from cutter import cutout
-
 
 def is_in_image(img, ann):
     y_i, x_i, w, h = ann['bbox']
@@ -19,7 +17,7 @@ def is_in_image(img, ann):
 
 
 class COCODataset():
-    def __init__(self, thing_file, stuff_file=None, transform=None):
+    def __init__(self, thing_file, stuff_file=None, filter_cats=None, transform=None):
         """
         Args:
             thing_file (string): File with all the thing images' regions.
@@ -39,9 +37,18 @@ class COCODataset():
             ann_ids = self.thing_coco_api.getAnnIds(catIds=[cat])
             abc.append(len(ann_ids))
             self.ann_ids_cat.append(ann_ids)
-        self.classes = np.nonzero(abc)[0]
-        self.img_ids = list(filter(lambda img_id: len(self.thing_coco_api.getAnnIds(img_id)) >= 2, self.thing_coco_api.getImgIds()))
-        self.img_ids = list(filter(lambda img_id: self.thing_coco_api.loadImgs([img_id])[0]['width'] >= 256 and self.thing_coco_api.loadImgs([img_id])[0]['height'] >= 256, self.img_ids))
+        self.filter_cats = np.nonzero(abc)[0]
+        self.img_ids = self.thing_coco_api.getImgIds()
+        #self.img_ids = list(filter(lambda img_id: len(self.thing_coco_api.getAnnIds(img_id)) >= 2, self.img_ids))
+
+        # both sides greater than 256
+        self.img_ids = list(filter(lambda img_id: self.thing_coco_api.loadImgs([img_id])[0]['width'] >= 256 and
+                                                  self.thing_coco_api.loadImgs([img_id])[0]['height'] >= 256,
+                                   self.img_ids))
+        # contain filter categories
+        if filter_cats is not None:
+            self.filter_cats = filter_cats
+            self.img_ids = list(filter(partial(self.contain_cats, filter_cats), self.img_ids))
 
     def __len__(self):
         return len(self.img_ids)
@@ -51,6 +58,13 @@ class COCODataset():
             idx = idx.tolist()
         ids = np.take(self.img_ids, idx)
         return ids
+
+    def contain_cats(self, cats, img_id):
+        anns = self.thing_coco_api.loadAnns(self.thing_coco_api.getAnnIds(imgIds=[img_id]))
+        for ann in anns:
+            if ann['category_id'] in cats:
+                return True
+        return False
 
     def rand_obj_by_img(self, ids):
         """
@@ -72,7 +86,7 @@ class COCODataset():
         for i in range(len(ids)):
             img_id = ids[i]
             img = imgs[i]
-            annotation_ids = self.thing_coco_api.getAnnIds(img_id, catIds=self.classes)
+            annotation_ids = self.thing_coco_api.getAnnIds(imgIds=img_id, catIds=self.filter_cats)
             annotations = self.thing_coco_api.loadAnns(annotation_ids)
             annotations = list(filter(partial(is_in_image, img), annotations))
             if len(annotations) == 0:
@@ -191,8 +205,8 @@ class COCODataset():
         return objects
 
     def get_rand_classes(self, cnt):
-        cats = np.random.randint(0, len(self.classes), cnt)
-        return np.take(self.classes, cats)
+        cats = np.random.randint(0, len(self.filter_cats), cnt)
+        return np.take(self.filter_cats, cats)
 
     def get_ratios(self, objects):
         """
@@ -227,7 +241,7 @@ class COCODataset():
         resized = resized[:, :, ih[:, None], iw].squeeze().numpy()
         if resized.ndim < 2:
             print("too small")
-            return np.array([])
+            return np.array([]), 0, 0, 0, 0
 
         # crop object if needed
         h_i = resized.shape[0]
@@ -267,7 +281,8 @@ class COCODataset():
         (segm_i[x_i_1:x_i_2, y_i_1:y_i_2])[resized[:, :, 3] > 0] = (resized[resized[:, :, 3] > 0])[:, :3]
 
 
-# dataset = COCODataset('coco/annotations/instances_train2017.json')
+# dataset = COCODataset('coco/annotations/instances_train2017.json', filter_cats=[1])
+# print(len(dataset))
 # backgrounds = dataset.__getitem__([0, 1, 2, 3, 4])
 # ids = dataset.get_rand_by_cats([0, 0, 0, 0, 0])
 # for i in range(len(ids)):

@@ -16,7 +16,7 @@ beta1 = 0.5
 b_size = 4
 ###########################
 
-dataset = COCODataset('coco/annotations/instances_train2017.json')#, 'coco/annotations/stuff_train2017.json')
+dataset = COCODataset('coco/annotations/instances_train2017.json', filter_cats=[1])#, 'coco/annotations/stuff_train2017.json')
 dataloader = DataLoader(dataset, batch_size=b_size, shuffle=True, num_workers=0)
 
 device = torch.device("cuda")
