@@ -39,7 +39,7 @@ class COCODataset():
             self.ann_ids_cat.append(ann_ids)
         self.filter_cats = np.nonzero(abc)[0]
         self.img_ids = self.thing_coco_api.getImgIds()
-        #self.img_ids = list(filter(lambda img_id: len(self.thing_coco_api.getAnnIds(img_id)) >= 2, self.img_ids))
+        self.img_ids = list(filter(lambda img_id: len(self.thing_coco_api.getAnnIds(img_id)) >= 2, self.img_ids))
 
         # both sides greater than 256
         self.img_ids = list(filter(lambda img_id: self.thing_coco_api.loadImgs([img_id])[0]['width'] >= 256 and
@@ -148,7 +148,7 @@ class COCODataset():
     def get_cat_num(self):
         return self.cat_num
 
-    def crop_by_bbox(mask, bbox):
+    def crop_by_bbox(self, mask, bbox):
         x1, y1, x2, y2 = bbox
         x1 = floor(x1)
         y1 = floor(y1)
@@ -172,15 +172,25 @@ class COCODataset():
         anns = self.thing_coco_api.loadAnns(ids)
         for i in range(len(ids)):
             data = self.thing_coco_api.annToMask(anns[i])
-            data = data[~np.all(data == 0, axis=1)]
-            idx = np.argwhere(np.all(data[..., :] == 0, axis=0))
-            data = np.delete(data, idx, axis=1)
+            data = self.crop_by_bbox(data, self.get_bbox_by_id(ids[i]))
             cat_id = anns[i]["category_id"]
             if data.size == 0:
                 data = np.array([[cat_id]])
             data[data > 0] = cat_id
             objects.append(data)
         return objects
+
+    def pad_objects(self, objects):
+        for i in range(len(objects)):
+            while objects[i].shape[0] > 256 or objects[i].shape[1] > 256:
+                objects[i] = objects[i][::2, ::2]
+            h, w = objects[i].shape
+            y1 = (256 - h + 1) // 2
+            y2 = (256 - h) // 2
+            x1 = (256 - w + 1) // 2
+            x2 = (256 - w) // 2
+            objects[i] = np.pad(objects[i], ((y1, y2), (x1, x2)), 'constant', constant_values=0)
+        return np.asarray(objects)
 
     def get_rand_by_classes(self, cats):
         """
@@ -266,10 +276,10 @@ class COCODataset():
 
     def inpaint_segmentation(self, object_i, x_i, y_i, h_i, w_i, segm_i):
         resized, x_i_1, x_i_2, y_i_1, y_i_2 = self.prepare_to_inpaint(object_i, x_i, y_i, h_i, w_i, segm_i)
-        if resized.size == 0:
-            print("bad size")
-        elif not np.any(resized > 0):
-            print("all false")
+        # if resized.size == 0:
+        #     print("bad size")
+        # elif not np.any(resized > 0):
+        #     print("all false")
         (segm_i[x_i_1:x_i_2, y_i_1:y_i_2])[resized > 0] = resized[resized > 0]
 
     def inpaint_image(self, object_i, x_i, y_i, h_i, w_i, segm_i):
