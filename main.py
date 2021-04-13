@@ -1,50 +1,61 @@
 import copy
+import os
+
 from matplotlib import pyplot as plt
 import torch
+from torch.utils.data import DataLoader
+import torchvision.transforms as T
+import torch.nn.functional as F
 
-from cutter import cutout
 from generator import Generator
-from objects_dataset import COCODataset
+from objects_dataset import BackgroundDataset, PeopleDataset
+
+###########################
+b_size = 16
+load_file = 'models/checkpoint4.pth.tar'
+###########################
+
+dataset = BackgroundDataset(filter_cats=[1], image_dir='coco/images/train2017', transform=T.Compose([T.Resize(256), T.RandomCrop(256), T.ToTensor()]))
+objects_dataset = PeopleDataset(image_dir='coco/images/fashionPNG', transform=T.Compose([T.Resize(256), T.ToTensor()]))
+dataloader = DataLoader(dataset, batch_size=b_size, shuffle=True, num_workers=0, drop_last=True)
 
 device = torch.device("cuda")
-dataset = COCODataset('coco/annotations/instances_train2017.json')
-netG = Generator(dataset.get_cat_num()).to(device)
-netG.load_state_dict(torch.load("models/4netG.pt"))
+netG = Generator().to(device)
 
-netG.eval()
+if load_file is not None:
+    if os.path.isfile(load_file):
+        print("=> loading checkpoint '{}'".format(load_file))
+        checkpoint = torch.load(load_file)
+        netG.load_state_dict(checkpoint['netG'])
+        netG.eval()
+        print("=> loaded checkpoint '{}' (epoch {})"
+              .format(load_file, checkpoint['epoch']))
+    else:
+        print("=> no checkpoint found at '{}'".format(load_file))
+
+
 with torch.no_grad():
-    data = dataset.__getitem__([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
-    segms = dataset.segm_by_ids(data)
-    noise = torch.randn(len(data), 100)
-    classes = torch.full((len(data),), 1, dtype=torch.int)
-    # Generate fake image batch with G
-    ids = dataset.get_rand_by_classes(classes)
-    objects = dataset.get_objects_by_ids(ids)
-    ratios = dataset.get_ratios(objects)
-    fake = netG(noise.to(device), classes.to(device), torch.as_tensor(ratios).type(torch.FloatTensor).to(device),
-                torch.as_tensor(segms).type(torch.FloatTensor).to(device))
+    for i_batch, segms in enumerate(dataloader, 0):
 
-    # merge masks
-    prev_segm = copy.deepcopy(segms)
-    abc = fake.detach().cpu().numpy()
-    x = abc[:, 0] * 255
-    y = abc[:, 1] * 255
-    coef = abc[:, 2] * 246 + 10
-    print(x)
-    print(y)
-    print(coef)
+        # Get Data
+        segms = segms.to(device)
+        objects = objects_dataset.get_rand_objects(b_size).to(device)
 
-    sizes = coef * ratios
-    for i in range(len(data)):
-        if round(sizes[i]) > 0 and round(coef[i]) > 0:
-            img = dataset.get_img_by_obj(ids[i])
-            co = cutout(img, dataset.get_trimap_by_id(ids[i]), dataset.get_bbox_by_id(ids[i]))
-            background = dataset.get_img(data[i])
-            dataset.inpaint_image(co, x[i], y[i], sizes[i], coef[i], background)
-    for i in range(len(data)):
-        plt.imshow(prev_segm[i])
-        plt.show()
-        plt.imshow(segms[i])
-        plt.show()
-        #plt.imsave("images/" + str(i) + "_test_prevSegm.png", prev_segm[i])
-        #plt.imsave("images/" + str(i) + "_test_segm.png", segms[i])
+        # Generate
+        noise = torch.randn(b_size, 100).to(device)
+        theta_out = netG(segms, objects, noise)
+        theta = theta_out + torch.FloatTensor([[1, 0, 0], [0, 1, 0]]).to(device)
+
+        # Merge masks
+        grid = F.affine_grid(theta, objects.size())
+        obj_fake = F.grid_sample(objects, grid)
+        color, mask = obj_fake[:, :3, :, :], obj_fake[:, 3:, :, :]
+        fake = color * mask + segms * (1 - mask)
+
+        for i in range(b_size):
+            plt.imshow(segms.detach().cpu()[i].permute(1, 2, 0).numpy())
+            plt.show()
+            plt.imshow(objects.detach().cpu()[i].permute(1, 2, 0).numpy())
+            plt.show()
+            plt.imshow(fake.detach().cpu()[i].permute(1, 2, 0).numpy())
+            plt.show()

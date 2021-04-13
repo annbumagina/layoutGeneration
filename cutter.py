@@ -52,14 +52,13 @@ def mask_to_trimap(mask, margin):
     return trimap
 
 
-def cutout(img, mask, bbox, margin=0.22, alpha_matting="cf"):
+def cutout(img, mask, bbox=None, margin=0.22, alpha_matting="cf"):
     np.set_printoptions(threshold=sys.maxsize, linewidth=sys.maxsize)
     mask = mask.astype(float)
     margin = get_margin(margin, mask)
-    img, mask = crop_by_bbox(img, mask, bbox, margin)
+    if bbox is not None:
+        img, mask = crop_by_bbox(img, mask, bbox, margin)
     trimap = mask_to_trimap(mask, margin)
     # cutout object
     cutout = cutout_object(img, trimap, alpha_matting)
     return cutout
-
-

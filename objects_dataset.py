@@ -1,3 +1,4 @@
+import copy
 from math import ceil, floor
 from pycocotools import coco
 import numpy as np
@@ -5,6 +6,18 @@ import torch
 from matplotlib import pyplot as plt
 from functools import partial
 from PIL import Image
+from os import listdir
+from os.path import isfile, join
+import torch.nn.functional as F
+import cv2 as cv
+
+from torchvision import transforms as T
+
+from cutter import cutout
+
+torch.set_printoptions(threshold=10000000)
+thing_coco_api = coco.COCO(annotation_file='coco/annotations/instances_train2017.json')
+stuff_coco_api = None#coco.COCO(annotation_file='coco/annotations/stuff_train2017.json')
 
 
 def is_in_image(img, ann):
@@ -16,34 +29,29 @@ def is_in_image(img, ann):
     return delta_h < x_c < 256 + delta_h and delta_w < y_c < 256 + delta_w
 
 
-class COCODataset():
-    def __init__(self, thing_file, stuff_file=None, filter_cats=None, transform=None):
+class BackgroundDataset:
+    def __init__(self, image_dir, transform=None, filter_cats=None):
         """
         Args:
-            thing_file (string): File with all the thing images' regions.
-            stuff_file (string): File with all the stuff images' regions.
-            transform (callable, optional): Optional transform to be applied
-                on a sample.
+            filter_cats (list): categories to use.
         """
         self.cat_num = 92
-        self.thing_coco_api = coco.COCO(annotation_file=thing_file)
-        self.stuff_coco_api = None
-        if stuff_file is not None:
-            self.stuff_coco_api = coco.COCO(annotation_file=stuff_file)
+        self.transform = transform
+        self.image_dir = image_dir
 
         self.ann_ids_cat = []
         abc = []
         for cat in range(self.cat_num):
-            ann_ids = self.thing_coco_api.getAnnIds(catIds=[cat])
+            ann_ids = thing_coco_api.getAnnIds(catIds=[cat])
             abc.append(len(ann_ids))
             self.ann_ids_cat.append(ann_ids)
         self.filter_cats = np.nonzero(abc)[0]
-        self.img_ids = self.thing_coco_api.getImgIds()
-        self.img_ids = list(filter(lambda img_id: len(self.thing_coco_api.getAnnIds(img_id)) >= 2, self.img_ids))
+        self.img_ids = thing_coco_api.getImgIds()
+        self.img_ids = list(filter(lambda img_id: len(thing_coco_api.getAnnIds(img_id)) >= 2, self.img_ids))
 
         # both sides greater than 256
-        self.img_ids = list(filter(lambda img_id: self.thing_coco_api.loadImgs([img_id])[0]['width'] >= 256 and
-                                                  self.thing_coco_api.loadImgs([img_id])[0]['height'] >= 256,
+        self.img_ids = list(filter(lambda img_id: thing_coco_api.loadImgs([img_id])[0]['width'] >= 256 and
+                                                  thing_coco_api.loadImgs([img_id])[0]['height'] >= 256,
                                    self.img_ids))
         # contain filter categories
         if filter_cats is not None:
@@ -53,56 +61,32 @@ class COCODataset():
     def __len__(self):
         return len(self.img_ids)
 
-    def __getitem__(self, idx):
+    def get_by_idx(self, idx):
         if torch.is_tensor(idx):
             idx = idx.tolist()
         ids = np.take(self.img_ids, idx)
-        return ids
+        images = []
+        for img_id in ids:
+            img = self.get_img(img_id)
+            if self.transform:
+                img = self.transform(img)
+            images.append(img)
+
+        images = torch.stack(images)
+        return images
+
+    def __getitem__(self, idx):
+        img = self.get_img(self.img_ids[idx])
+        if self.transform:
+            img = self.transform(img)
+        return img
 
     def contain_cats(self, cats, img_id):
-        anns = self.thing_coco_api.loadAnns(self.thing_coco_api.getAnnIds(imgIds=[img_id]))
+        anns = thing_coco_api.loadAnns(thing_coco_api.getAnnIds(imgIds=[img_id]))
         for ann in anns:
             if ann['category_id'] in cats:
                 return True
         return False
-
-    def rand_obj_by_img(self, ids):
-        """
-        Chooses one random object on each image.
-
-        Args:
-            ids (list or tensor): Image ids.
-        Returns:
-            x (list): x coordinates of objects (vertical)
-            y (list): y coordinates of objects (horizontal)
-            widths (list): coefficients of objects
-        """
-        if torch.is_tensor(ids):
-            ids = ids.tolist()
-        imgs = self.thing_coco_api.loadImgs(ids)
-        x = []
-        y = []
-        widths = []
-        for i in range(len(ids)):
-            img_id = ids[i]
-            img = imgs[i]
-            annotation_ids = self.thing_coco_api.getAnnIds(imgIds=img_id, catIds=self.filter_cats)
-            annotations = self.thing_coco_api.loadAnns(annotation_ids)
-            annotations = list(filter(partial(is_in_image, img), annotations))
-            if len(annotations) == 0:
-                x.append(0.5)
-                y.append(0.5)
-                widths.append(0.5)
-            else:
-                y_i, x_i, w, h = np.random.choice(annotations)['bbox']
-                delta_w = (img['width'] - 256) / 2.
-                delta_h = (img['height'] - 256) / 2.
-                x_c = x_i + h / 2. - delta_h
-                y_c = y_i + w / 2. - delta_w
-                x.append(x_c / 256.)
-                y.append(y_c / 256.)
-                widths.append(w / img['width'])
-        return x, y, widths
 
     def crop(self, img, tw, th):
         """
@@ -126,24 +110,111 @@ class COCODataset():
             ids = ids.tolist()
         images = []
         for img_id in ids:
-            annotation_ids = self.thing_coco_api.getAnnIds(img_id)
-            annotations = self.thing_coco_api.loadAnns(annotation_ids)
-            if self.stuff_coco_api is not None:
-                stuff_ids = self.stuff_coco_api.getAnnIds(img_id)
-                annotations = annotations + self.stuff_coco_api.loadAnns(stuff_ids)
+            annotation_ids = thing_coco_api.getAnnIds(img_id)
+            annotations = thing_coco_api.loadAnns(annotation_ids)
+            if stuff_coco_api is not None:
+                stuff_ids = stuff_coco_api.getAnnIds(img_id)
+                annotations = annotations + stuff_coco_api.loadAnns(stuff_ids)
 
             cat_id = annotations[0]["category_id"]
-            mask = self.thing_coco_api.annToMask(annotations[0])
+            mask = thing_coco_api.annToMask(annotations[0])
             mask[mask == 1] = cat_id
             segm = mask
             for i in range(1, len(annotations)):
                 cat_id = annotations[i]["category_id"]
-                mask = self.thing_coco_api.annToMask(annotations[i])
+                mask = thing_coco_api.annToMask(annotations[i])
                 segm[np.logical_and(mask == 1, segm == 0)] = cat_id
 
             segm = self.crop(segm, 256, 256)
             images.append(segm)
         return images
+
+    def get_cat_num(self):
+        return self.cat_num
+
+    def get_trimap_by_id(self, id):
+        ann = thing_coco_api.loadAnns([id])[0]
+        return thing_coco_api.annToMask(ann)
+
+    def get_bbox_by_id(self, id):
+        ann = thing_coco_api.loadAnns([id])[0]
+        x1, y1, w, h = ann['bbox']
+        x2 = x1 + w
+        y2 = y1 + h
+        return x1, y1, x2, y2
+
+    def get_img(self, img_id):
+        img_file = thing_coco_api.loadImgs([img_id])[0]['file_name']
+        # thing_coco_api.download("coco/images", [img_id])
+        img = Image.open(self.image_dir + "/" + img_file).convert("RGB")
+        return img #np.array(img) / 255.0
+
+    def get_img_by_obj(self, obj):
+        ann = thing_coco_api.loadAnns([obj])[0]
+        img_id = ann["image_id"]
+        return self.get_img(img_id)
+
+
+class ObjectsDataset:
+    def __init__(self, image_dir, filter_cats=None):
+        """
+        Args:
+            filter_cats (list): Categories to use.
+        """
+        self.cat_num = 92
+        self.ann_ids_cat = []
+        self.image_dir = image_dir
+
+        abc = []
+        for cat in range(self.cat_num):
+            ann_ids = thing_coco_api.getAnnIds(catIds=[cat])
+            abc.append(len(ann_ids))
+            self.ann_ids_cat.append(ann_ids)
+        self.filter_cats = np.nonzero(abc)[0]
+
+        # contain filter categories
+        if filter_cats is not None:
+            self.filter_cats = filter_cats
+        self.annotations_ids = thing_coco_api.getAnnIds(catIds=self.filter_cats, iscrowd=False)
+        # filter very small objects
+        self.annotations_ids = list(filter(lambda ann_id: thing_coco_api.loadAnns([ann_id])[0]['bbox'][2] >= 50 and
+                                                  thing_coco_api.loadAnns([ann_id])[0]['bbox'][3] >= 50,
+                                   self.annotations_ids))
+        anns_pos = np.random.randint(0, len(self.annotations_ids), 60_000)
+        self.annotations_ids = np.take(self.annotations_ids, anns_pos)
+
+    def __len__(self):
+        return len(self.annotations_ids)
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+        ids = np.take(self.annotations_ids, idx)
+        return ids
+
+    def get_img(self, img_id):
+        img_file = thing_coco_api.loadImgs([img_id])[0]['file_name']
+        img = Image.open(self.image_dir + "/" + img_file).convert("RGB")
+        return np.array(img) / 255.0
+
+    def get_img_by_obj(self, obj):
+        ann = thing_coco_api.loadAnns([obj])[0]
+        img_id = ann["image_id"]
+        return self.get_img(img_id)
+
+    def get_trimap_by_id(self, id):
+        ann = thing_coco_api.loadAnns([id])[0]
+        data = thing_coco_api.annToMask(ann)
+        if data.size == 0:
+            data = np.array([[1]])
+        return data
+
+    def get_rand_objects(self, cnt):
+        ids = np.random.randint(0, len(self.annotations_ids), cnt)
+        ids = np.take(self.annotations_ids, ids)
+        return ids
+        #objects = self.get_objects_by_ids(ids)
+        #return self.pad_objects(objects)
 
     def get_cat_num(self):
         return self.cat_num
@@ -156,22 +227,20 @@ class COCODataset():
         y2 = ceil(y2)
         return mask[y1:y2 + 1, x1:x2 + 1]
 
-    def get_trimap_by_id(self, id):
-        ann = self.thing_coco_api.loadAnns([id])[0]
-        return self.thing_coco_api.annToMask(ann)
-
     def get_bbox_by_id(self, id):
-        ann = self.thing_coco_api.loadAnns([id])[0]
+        ann = thing_coco_api.loadAnns([id])[0]
         x1, y1, w, h = ann['bbox']
         x2 = x1 + w
         y2 = y1 + h
         return x1, y1, x2, y2
 
     def get_objects_by_ids(self, ids):
+        if torch.is_tensor(ids):
+            ids = ids.tolist()
         objects = []
-        anns = self.thing_coco_api.loadAnns(ids)
+        anns = thing_coco_api.loadAnns(ids)
         for i in range(len(ids)):
-            data = self.thing_coco_api.annToMask(anns[i])
+            data = thing_coco_api.annToMask(anns[i])
             data = self.crop_by_bbox(data, self.get_bbox_by_id(ids[i]))
             cat_id = anns[i]["category_id"]
             if data.size == 0:
@@ -180,127 +249,94 @@ class COCODataset():
             objects.append(data)
         return objects
 
-    def pad_objects(self, objects):
-        for i in range(len(objects)):
-            while objects[i].shape[0] > 256 or objects[i].shape[1] > 256:
-                objects[i] = objects[i][::2, ::2]
-            h, w = objects[i].shape
+    def make_square(self, im, fill_color=(0, 0, 0, 0)):
+        x, y = im.size
+        size = max(x, y)
+        new_im = Image.new('RGBA', (size, size), fill_color)
+        new_im.paste(im, (int((size - x) / 2), int((size - y) / 2)))
+        return T.Resize(256).forward(new_im)
+
+    def pad_objects(self, objects, make_copy=False):
+        """
+        Pads objects with zeros to be 256*256 size (object in the center)
+        """
+        padded_objects = objects
+        if make_copy:
+            padded_objects = copy.deepcopy(objects)
+        for i in range(len(padded_objects)):
+            while padded_objects[i].shape[0] > 256 or padded_objects[i].shape[1] > 256:
+                padded_objects[i] = padded_objects[i][::2, ::2]
+            while padded_objects[i].shape[0] * 2 < 256 and padded_objects[i].shape[1] * 2 < 256:
+                padded_objects[i] = padded_objects[i].repeat(2, axis=0).repeat(2, axis=1)
+            h, w = padded_objects[i].shape
             y1 = (256 - h + 1) // 2
             y2 = (256 - h) // 2
             x1 = (256 - w + 1) // 2
             x2 = (256 - w) // 2
-            objects[i] = np.pad(objects[i], ((y1, y2), (x1, x2)), 'constant', constant_values=0)
-        return np.asarray(objects)
-
-    def get_rand_by_classes(self, cats):
-        """
-        Chooses random objects from given categories.
-
-        Args:
-            cats (list or tensor): Categories indexes.
-        Returns:
-            objects (numpy array): Ids of chosen objects
-        """
-        if torch.is_tensor(cats):
-            cats = cats.numpy()
-        distinct = list(set(cats))
-
-        objects = np.empty(len(cats))
-        for cat in distinct:
-            cat_ind = np.where(cats == cat)[0]
-            cnt = len(cat_ind)
-            ann_ids = self.ann_ids_cat[cat]
-            ann_ids_ids = np.random.randint(0, len(ann_ids), cnt)
-            objects[cats == cat] = np.asarray(ann_ids)[ann_ids_ids]
-        return objects
-
-    def get_rand_classes(self, cnt):
-        cats = np.random.randint(0, len(self.filter_cats), cnt)
-        return np.take(self.filter_cats, cats)
-
-    def get_ratios(self, objects):
-        """
-        Computes ratios (height / width) of given objects
-        """
-        ratios = np.empty(len(objects))
-        for i in range(len(objects)):
-            a, b = objects[i].shape
-            ratios[i] = a / b
-        return ratios
-
-    def get_img(self, img_id):
-        img_file = self.thing_coco_api.loadImgs([img_id])[0]['file_name']
-        self.thing_coco_api.download("coco/images", [img_id])
-        img = Image.open("coco/images/" + img_file).convert("RGB")
-        return np.array(img) / 255.0
-
-    def get_img_by_obj(self, obj):
-        ann = self.thing_coco_api.loadAnns([obj])[0]
-        img_id = ann["image_id"]
-        return self.get_img(img_id)
-
-    def prepare_to_inpaint(self, object_i, x_i, y_i, h_i, w_i, segm_i):
-        # resize object
-        resized = torch.as_tensor(object_i).unsqueeze(0).unsqueeze(0)
-        H = object_i.shape[0]
-        W = object_i.shape[1]
-        h = int(round(h_i))  # sizes
-        w = int(round(w_i))  # coef
-        iw = torch.linspace(0, W - 1, w).long()
-        ih = torch.linspace(0, H - 1, h).long()
-        resized = resized[:, :, ih[:, None], iw].squeeze().numpy()
-        if resized.ndim < 2:
-            print("too small")
-            return np.array([]), 0, 0, 0, 0
-
-        # crop object if needed
-        h_i = resized.shape[0]
-        w_i = resized.shape[1]
-        x_i_1 = int(round(x_i)) - h_i // 2
-        if x_i_1 < 0:
-            resized = resized[-x_i_1:]
-            x_i_1 = 0
-        x_i_2 = int(round(x_i)) + (h_i + 1) // 2
-        if x_i_2 > segm_i.shape[0]:
-            resized = resized[:segm_i.shape[0] - x_i_2]
-            x_i_2 = segm_i.shape[0]
-        y_i_1 = int(round(y_i)) - w_i // 2
-        if y_i_1 < 0:
-            resized = resized[:, -y_i_1:]
-            y_i_1 = 0
-        y_i_2 = int(round(y_i)) + (w_i + 1) // 2
-        if y_i_2 > segm_i.shape[1]:
-            resized = resized[:, :segm_i.shape[1] - y_i_2]
-            y_i_2 = segm_i.shape[1]
-        return resized, x_i_1, x_i_2, y_i_1, y_i_2
-
-    def inpaint_segmentation(self, object_i, x_i, y_i, h_i, w_i, segm_i):
-        resized, x_i_1, x_i_2, y_i_1, y_i_2 = self.prepare_to_inpaint(object_i, x_i, y_i, h_i, w_i, segm_i)
-        # if resized.size == 0:
-        #     print("bad size")
-        # elif not np.any(resized > 0):
-        #     print("all false")
-        (segm_i[x_i_1:x_i_2, y_i_1:y_i_2])[resized > 0] = resized[resized > 0]
-
-    def inpaint_image(self, object_i, x_i, y_i, h_i, w_i, segm_i):
-        resized, x_i_1, x_i_2, y_i_1, y_i_2 = self.prepare_to_inpaint(object_i, x_i, y_i, h_i, w_i, segm_i)
-        if resized.size == 0:
-            print("bad size")
-        elif not np.any(resized > 0):
-            print("all false")
-        (segm_i[x_i_1:x_i_2, y_i_1:y_i_2])[resized[:, :, 3] > 0] = (resized[resized[:, :, 3] > 0])[:, :3]
+            padded_objects[i] = np.pad(padded_objects[i], ((y1, y2), (x1, x2)), 'constant', constant_values=0)
+        return np.asarray(padded_objects)
 
 
-# dataset = COCODataset('coco/annotations/instances_train2017.json', filter_cats=[1])
-# print(len(dataset))
-# backgrounds = dataset.__getitem__([0, 1, 2, 3, 4])
-# ids = dataset.get_rand_by_cats([0, 0, 0, 0, 0])
-# for i in range(len(ids)):
-#     img = dataset.get_img_by_obj(ids[i])
-#     co = cutout(img, dataset.get_trimap_by_id(ids[i]), dataset.get_bbox_by_id(ids[i]))
-#     background = dataset.get_img(backgrounds[i])
-#     plt.imshow(background)
+class PeopleDataset:
+    def __init__(self, image_dir, transform=None):
+        self.transform = transform
+        self.image_dir = image_dir
+        self.files = [join(image_dir, f) for f in listdir(image_dir) if isfile(join(image_dir, f))]
+
+    def get_rand_objects(self, cnt):
+        ids = np.random.randint(0, len(self.files), cnt)
+        files = np.take(self.files, ids)
+        images = []
+        for img_file in files:
+            img = self.get_img(img_file)
+            if self.transform:
+                img = self.transform(img)
+            images.append(img)
+
+        images = torch.stack(images)
+        return images
+
+    def get_img(self, img_file):
+        img = Image.open(img_file).convert("RGBA")
+        # img = T.Resize(256).forward(img)
+        # threshold = 252
+        # arr = np.array(np.asarray(img))
+        # r, g, b, a = np.rollaxis(arr, axis=-1)
+        # mask = ((r >= threshold) & (g >= threshold) & (b >= threshold))
+        # a[mask] = 0
+        # plt.imshow(a)
+        # plt.show()
+        # a = cv.erode(a, (5, 5), iterations=10)
+        # #a = cv.GaussianBlur(a, (15, 15), 0)
+        # arr = np.dstack((r, g, b, a))
+        # img = Image.fromarray(arr, mode='RGBA')
+        return img
+
+
+# dataset = BackgroundDataset(filter_cats=[1], image_dir='coco/images/train2017', transform=T.Compose([T.Resize(256), T.RandomCrop(256), T.ToTensor()]))
+# segms = dataset.__getitem__([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+#
+# dataset = PeopleDataset(image_dir='coco/images/objects', transform=T.Compose([T.Resize(256), T.ToTensor()]))
+# images = dataset.get_rand_objects(10)
+#
+# color, mask = images[:, :3, :, :], images[:, 3:, :, :]
+# fake = color * mask + segms * (1 - mask)
+# for i in range(10):
+#     plt.imshow(fake[i].permute(1, 2, 0))
 #     plt.show()
-#     dataset.inpaint_image(co, 50, 50, co.shape[0], co.shape[1], background)
-#     plt.imshow(background)
-#     plt.show()
+
+# dataset = ObjectsDataset(filter_cats=[1], image_dir='coco/images/train2017')
+# ids = dataset.get_rand_objects(10000)
+#
+# for id in ids:
+#     img = dataset.get_img_by_obj(id)
+#     co = cutout(img, dataset.get_trimap_by_id(id), dataset.get_bbox_by_id(id))
+#
+#     r, g, b, a = np.rollaxis(co, axis=-1)
+#     a = cv.erode(a, (3, 3), iterations=3)
+#     a = cv.GaussianBlur(a, (5, 5), 0)
+#     co = np.dstack((r, g, b, a))
+#
+#     result = Image.fromarray((co * 255).astype('uint8'), 'RGBA')
+#     result = dataset.make_square(result)
+#     result.save("coco/images/objects/" + str(id) + '.png')
