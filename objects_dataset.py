@@ -17,7 +17,14 @@ from cutter import cutout
 
 torch.set_printoptions(threshold=10000000)
 thing_coco_api = coco.COCO(annotation_file='coco/annotations/instances_train2017.json')
-stuff_coco_api = None#coco.COCO(annotation_file='coco/annotations/stuff_train2017.json')
+stuff_coco_api = coco.COCO(annotation_file='coco/annotations/stuff_train2017.json')
+
+# outdoor
+sky = [157, 106]
+ground = [126, 145, 144, 147, 140, 149, 125, 136, 111, 159, 154]
+# indoor
+floors = [114, 115, 116, 117, 118, 101]
+wall = [171, 172, 173, 174, 175, 176, 177]
 
 
 def is_in_image(img, ann):
@@ -39,24 +46,28 @@ class BackgroundDataset:
         self.transform = transform
         self.image_dir = image_dir
 
-        self.ann_ids_cat = []
-        abc = []
-        for cat in range(self.cat_num):
-            ann_ids = thing_coco_api.getAnnIds(catIds=[cat])
-            abc.append(len(ann_ids))
-            self.ann_ids_cat.append(ann_ids)
-        self.filter_cats = np.nonzero(abc)[0]
-        self.img_ids = thing_coco_api.getImgIds()
-        self.img_ids = list(filter(lambda img_id: len(thing_coco_api.getAnnIds(img_id)) >= 2, self.img_ids))
-
+        # self.ann_ids_cat = []
+        # abc = []
+        # for cat in range(self.cat_num):
+        #     ann_ids = thing_coco_api.getAnnIds(catIds=[cat])
+        #     abc.append(len(ann_ids))
+        #     self.ann_ids_cat.append(ann_ids)
+        # self.filter_cats = np.nonzero(abc)[0]
+        self.img_ids = stuff_coco_api.getImgIds()
+        self.img_ids = \
+            list(filter(lambda img_id: (self.contain_cats(sky, img_id) and self.contain_cats(ground, img_id)) or
+                                       (self.contain_cats(wall, img_id) and self.contain_cats(floors, img_id)),
+                        self.img_ids))
+        print(len(self.img_ids))
+        # self.img_ids = list(filter(lambda img_id: len(thing_coco_api.getAnnIds(img_id)) >= 2, self.img_ids))
         # both sides greater than 256
-        self.img_ids = list(filter(lambda img_id: thing_coco_api.loadImgs([img_id])[0]['width'] >= 256 and
-                                                  thing_coco_api.loadImgs([img_id])[0]['height'] >= 256,
-                                   self.img_ids))
+        # self.img_ids = list(filter(lambda img_id: thing_coco_api.loadImgs([img_id])[0]['width'] >= 256 and
+        #                                           thing_coco_api.loadImgs([img_id])[0]['height'] >= 256,
+        #                            self.img_ids))
         # contain filter categories
-        if filter_cats is not None:
-            self.filter_cats = filter_cats
-            self.img_ids = list(filter(partial(self.contain_cats, filter_cats), self.img_ids))
+        # if filter_cats is not None:
+        #     self.filter_cats = filter_cats
+        #     self.img_ids = list(filter(partial(self.contain_cats, filter_cats), self.img_ids))
 
     def __len__(self):
         return len(self.img_ids)
@@ -81,8 +92,12 @@ class BackgroundDataset:
             img = self.transform(img)
         return img
 
-    def contain_cats(self, cats, img_id):
-        anns = thing_coco_api.loadAnns(thing_coco_api.getAnnIds(imgIds=[img_id]))
+    def contain_cats(self, cats, img_id, stuff=True):
+        if stuff:
+            anns = stuff_coco_api.loadAnns(stuff_coco_api.getAnnIds(imgIds=[img_id]))
+        else:
+            anns = thing_coco_api.loadAnns(thing_coco_api.getAnnIds(imgIds=[img_id]))
+
         for ann in anns:
             if ann['category_id'] in cats:
                 return True
@@ -314,14 +329,20 @@ class PeopleDataset:
 
 
 # dataset = BackgroundDataset(filter_cats=[1], image_dir='coco/images/train2017', transform=T.Compose([T.Resize(256), T.RandomCrop(256), T.ToTensor()]))
-# segms = dataset.__getitem__([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+# segms = dataset.__getitem__(100)
 #
 # dataset = PeopleDataset(image_dir='coco/images/objects', transform=T.Compose([T.Resize(256), T.ToTensor()]))
-# images = dataset.get_rand_objects(10)
+# images = dataset.get_rand_objects(4)
+#
+# theta = torch.FloatTensor([[[0.1, 0, 0], [0, 0.1, 0]], [[0.25, 0, 0], [0, 0.25, 0]], [[0.5, 0, 0], [0, 0.5, 0]], [[0.75, 0, 0], [0, 0.75, 0]]])
+# theta = theta ** torch.FloatTensor([[-1, 1, 1], [1, -1, 1]])
+# print(theta)
+# grid = F.affine_grid(theta, images.size())
+# images = F.grid_sample(images, grid)
 #
 # color, mask = images[:, :3, :, :], images[:, 3:, :, :]
 # fake = color * mask + segms * (1 - mask)
-# for i in range(10):
+# for i in range(4):
 #     plt.imshow(fake[i].permute(1, 2, 0))
 #     plt.show()
 
